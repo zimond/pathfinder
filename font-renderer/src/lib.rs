@@ -10,6 +10,7 @@
 
 extern crate app_units;
 extern crate euclid;
+extern crate libc;
 extern crate pathfinder_path_utils;
 
 #[allow(unused_imports)]
@@ -28,6 +29,14 @@ extern crate core_text;
 #[cfg(any(target_os = "linux", feature = "freetype"))]
 extern crate freetype_sys;
 
+#[cfg(target_os = "windows")]
+extern crate dwrite;
+#[cfg(target_os = "windows")]
+extern crate uuid;
+#[cfg(target_os = "windows")]
+#[macro_use(DEFINE_GUID)]
+extern crate winapi;
+
 use app_units::Au;
 use euclid::{Point2D, Size2D};
 use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
@@ -39,6 +48,9 @@ pub use freetype::FontContext;
 
 #[cfg(all(target_os = "macos", not(feature = "freetype")))]
 mod core_graphics;
+
+#[cfg(target_os = "windows")]
+mod directwrite;
 
 #[cfg(any(target_os = "linux", feature = "freetype"))]
 mod freetype;
