@@ -160,7 +160,6 @@ impl GlyphOutline {
                 CGPathElementType::CloseSubpath => PathCommand::ClosePath,
             });
         });
-        //println!("{:?}", commands);
         return GlyphOutline {
             commands: commands,
             index: 0,
