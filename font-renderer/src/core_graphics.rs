@@ -105,7 +105,6 @@ impl FontContext {
 
     pub fn glyph_outline(&mut self, font_instance: &FontInstanceKey, glyph_key: &GlyphKey)
                          -> Result<GlyphOutline, ()> {
-        //println!("GlyphOutline({:?})", font_instance);
         let core_text_font = try!(self.ensure_core_text_font(font_instance));
         let path = try!(core_text_font.create_path_for_glyph(glyph_key.glyph_index as CGGlyph,
                                                              &CG_AFFINE_TRANSFORM_IDENTITY));
