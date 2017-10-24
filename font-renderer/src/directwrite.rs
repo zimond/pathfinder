@@ -8,6 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use winapi::IDWriteGdiInterop;
 use std::collections::BTreeMap;
 use winapi::IDWriteFontFace;
 use std::ops::Deref;
@@ -68,6 +69,7 @@ static PATHFINDER_FONT_FILE_KEY: [u8; 6] = *b"MEMORY";
 
 pub struct FontContext {
     dwrite_factory: PathfinderComPtr<IDWriteFactory>,
+    dwrite_gdi_interop: PathfinderComPtr<IDWriteGdiInterop>,
     dwrite_font_faces: BTreeMap<FontKey, PathfinderComPtr<IDWriteFontFace>>,
 }
 
@@ -81,8 +83,17 @@ impl FontContext {
                                                                 *mut *mut IUnknown)) {
                 return Err(())
             }
+            let factory = PathfinderComPtr::new(factory);
+
+            let mut gdi_interop: *mut IDWriteGdiInterop = ptr::null_mut();
+            if !winerror::SUCCEEDED((**factory).GetGdiInterop(&mut gdi_interop)) {
+                return Err(())
+            }
+            let gdi_interop = PathfinderComPtr::new(gdi_interop);
+
             Ok(FontContext {
-                dwrite_factory: PathfinderComPtr::new(factory),
+                dwrite_factory: factory,
+                dwrite_gdi_interop: gdi_interop,
                 dwrite_font_faces: BTreeMap::new(),
             })
         }
@@ -402,6 +413,11 @@ impl PathfinderFontFileStream {
         let this = this as *mut PathfinderFontFileStream;
         (*(this as *mut IUnknown)).Release();
     }
+}
+
+struct PathfinderGeometrySink {
+    object: PathfinderComObject<PathfinderGeometrySink>,
+    commands: Vec<CubicCommand>,
 }
 
 // ---
