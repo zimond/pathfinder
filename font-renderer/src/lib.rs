@@ -32,6 +32,8 @@ extern crate freetype_sys;
 #[cfg(target_os = "windows")]
 extern crate dwrite;
 #[cfg(target_os = "windows")]
+extern crate kernel32;
+#[cfg(target_os = "windows")]
 extern crate uuid;
 #[cfg(target_os = "windows")]
 #[macro_use(DEFINE_GUID)]

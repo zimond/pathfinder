@@ -31,6 +31,7 @@ git = "https://github.com/servo/core-text-rs.git"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 dwrite-sys = "0.2"
+kernel32-sys = "0.2"
 uuid-sys = "0.1"
 winapi = "0.2"
 
