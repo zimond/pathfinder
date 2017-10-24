@@ -8,6 +8,27 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use winapi::D2D1_FIGURE_END_CLOSED;
+use GlyphDimensions;
+use winapi::DWRITE_GLYPH_METRICS;
+use winapi::UINT16;
+use winapi::FLOAT;
+use winapi::DWRITE_FONT_METRICS;
+use GlyphKey;
+use FontInstanceKey;
+use pathfinder_path_utils::PathCommand;
+use winapi::D2D1_PATH_SEGMENT;
+use winapi::D2D1_FILL_MODE;
+use winapi::D2D1_FIGURE_END;
+use winapi::D2D1_FIGURE_BEGIN;
+use uuid::IID_ID2D1SimplifiedGeometrySink;
+use winapi::ID2D1SimplifiedGeometrySink;
+use winapi::D2D1_POINT_2F;
+use winapi::UINT;
+use winapi::D2D1_BEZIER_SEGMENT;
+use winapi::ID2D1SimplifiedGeometrySinkVtbl;
+use winapi::IDWriteGeometrySink;
+use pathfinder_path_utils::cubic::CubicPathCommand;
 use winapi::IDWriteGdiInterop;
 use std::collections::BTreeMap;
 use winapi::IDWriteFontFace;
@@ -26,7 +47,9 @@ use winapi::IDWriteFontFileStreamVtbl;
 use winapi::IDWriteFontFileLoaderVtbl;
 use winapi::IDWriteFontFileEnumeratorVtbl;
 use dwrite;
+use euclid::{Point2D, Size2D};
 use kernel32;
+use pathfinder_path_utils::cubic::CubicPathCommandApproxStream;
 use std::mem;
 use std::os::raw::c_void;
 use std::ptr;
@@ -64,6 +87,10 @@ DEFINE_GUID! {
     IID_IDWriteFontFileStream,
     0x6d4865fe, 0x0ab8, 0x4d91, 0x8f, 0x62, 0x5d, 0xd6, 0xbe, 0x34, 0xa3, 0xe0
 }
+
+pub type GlyphOutline = Vec<PathCommand>;
+
+const CURVE_APPROX_ERROR_BOUND: f32 = 0.1;
 
 static PATHFINDER_FONT_FILE_KEY: [u8; 6] = *b"MEMORY";
 
@@ -138,6 +165,69 @@ impl FontContext {
 
             self.dwrite_font_faces.insert(*font_key, font_face);
             Ok(())
+        }
+    }
+
+    #[inline]
+    pub fn delete_font(&mut self, font_key: &FontKey) {
+        self.dwrite_font_faces.remove(font_key);
+    }
+
+    pub fn glyph_dimensions(&self, font_instance: &FontInstanceKey, glyph_key: &GlyphKey)
+                            -> Option<GlyphDimensions> {
+        unsafe {
+            let font_face = match self.dwrite_font_faces.get(&font_instance.font_key) {
+                None => return None,
+                Some(font_face) => (*font_face).clone(),
+            };
+
+            let glyph_index = glyph_key.glyph_index as UINT16;
+            let mut metrics: DWRITE_GLYPH_METRICS = mem::zeroed();
+
+            let result = (**font_face).GetDesignGlyphMetrics(&glyph_index, 1, &mut metrics, FALSE);
+            if !winerror::SUCCEEDED(result) {
+                return None
+            }
+
+            Some(GlyphDimensions {
+                advance: metrics.advanceWidth as f32,
+                origin: Point2D::new(metrics.leftSideBearing, metrics.bottomSideBearing),
+                size: Size2D::new((metrics.rightSideBearing - metrics.leftSideBearing) as u32,
+                                  (metrics.topSideBearing - metrics.bottomSideBearing) as u32),
+            })
+        }
+    }
+
+    pub fn glyph_outline(&mut self, font_instance: &FontInstanceKey, glyph_key: &GlyphKey)
+                         -> Result<Vec<PathCommand>, ()> {
+        unsafe {
+            let font_face = match self.dwrite_font_faces.get(&font_instance.font_key) {
+                None => return Err(()),
+                Some(font_face) => (*font_face).clone(),
+            };
+
+            let mut metrics: DWRITE_FONT_METRICS = mem::zeroed();
+            (**font_face).GetMetrics(&mut metrics);
+
+            let geometry_sink = PathfinderGeometrySink::new();
+            let glyph_index = glyph_key.glyph_index as UINT16;
+
+            let result =
+                (**font_face).GetGlyphRunOutline(metrics.designUnitsPerEm as FLOAT,    
+                                                 &glyph_index,
+                                                 ptr::null(),
+                                                 ptr::null(),
+                                                 1,
+                                                 FALSE,
+                                                 FALSE,
+                                                 *geometry_sink as *mut IDWriteGeometrySink);
+
+            let approx_stream =
+                CubicPathCommandApproxStream::new((**geometry_sink).commands.iter().cloned(),
+                                                  CURVE_APPROX_ERROR_BOUND);
+
+            let approx_commands: Vec<_> = approx_stream.collect();
+            Ok(approx_commands)
         }
     }
 }
@@ -417,7 +507,102 @@ impl PathfinderFontFileStream {
 
 struct PathfinderGeometrySink {
     object: PathfinderComObject<PathfinderGeometrySink>,
-    commands: Vec<CubicCommand>,
+    commands: Vec<CubicPathCommand>,
+}
+
+static PATHFINDER_GEOMETRY_SINK_VTABLE: ID2D1SimplifiedGeometrySinkVtbl =
+        ID2D1SimplifiedGeometrySinkVtbl {
+    parent: IUnknownVtbl {
+        AddRef: PathfinderComObject::<PathfinderGeometrySink>::AddRef,
+        Release: PathfinderComObject::<PathfinderGeometrySink>::Release,
+        QueryInterface: PathfinderComObject::<PathfinderGeometrySink>::QueryInterface,
+    },
+    AddBeziers: PathfinderGeometrySink::AddBeziers,
+    AddLines: PathfinderGeometrySink::AddLines,
+    BeginFigure: PathfinderGeometrySink::BeginFigure,
+    Close: PathfinderGeometrySink::Close,
+    EndFigure: PathfinderGeometrySink::EndFigure,
+    SetFillMode: PathfinderGeometrySink::SetFillMode,
+    SetSegmentFlags: PathfinderGeometrySink::SetSegmentFlags,
+};
+
+impl PathfinderCoclass for PathfinderGeometrySink {
+    type InterfaceVtable = ID2D1SimplifiedGeometrySinkVtbl;
+    fn interface_guid() -> &'static GUID { unsafe { &IID_ID2D1SimplifiedGeometrySink } }
+    fn vtable() -> &'static ID2D1SimplifiedGeometrySinkVtbl { &PATHFINDER_GEOMETRY_SINK_VTABLE }
+}
+
+impl PathfinderGeometrySink {
+    #[inline]
+    fn new() -> PathfinderComPtr<PathfinderGeometrySink> {
+        unsafe {
+            PathfinderComPtr::new(Box::into_raw(Box::new(PathfinderGeometrySink {
+                object: PathfinderComObject::construct(),
+                commands: vec![],
+            })))
+        }
+    }
+
+    unsafe extern "system" fn AddBeziers(this: *mut IDWriteGeometrySink,
+                                         beziers: *const D2D1_BEZIER_SEGMENT,
+                                         beziers_count: UINT) {
+        let this = this as *mut PathfinderGeometrySink;
+        let beziers = slice::from_raw_parts(beziers, beziers_count as usize);
+        for bezier in beziers {
+            let control_point_0 =
+                PathfinderGeometrySink::d2d_point_2f_to_f32_point(&bezier.point1);
+            let control_point_1 =
+                PathfinderGeometrySink::d2d_point_2f_to_f32_point(&bezier.point2);
+            let endpoint = PathfinderGeometrySink::d2d_point_2f_to_f32_point(&bezier.point3);
+            (*this).commands.push(CubicPathCommand::CubicCurveTo(control_point_0,
+                                                                 control_point_1,
+                                                                 endpoint))
+        }
+    }
+
+    unsafe extern "system" fn AddLines(this: *mut IDWriteGeometrySink,
+                                       points: *const D2D1_POINT_2F,
+                                       points_count: UINT) {
+        let this = this as *mut PathfinderGeometrySink;
+        let points = slice::from_raw_parts(points, points_count as usize);
+        for point in points {
+            let point = PathfinderGeometrySink::d2d_point_2f_to_f32_point(&point);
+            (*this).commands.push(CubicPathCommand::LineTo(point))
+        }
+    }
+
+    unsafe extern "system" fn BeginFigure(this: *mut IDWriteGeometrySink,
+                                          start_point: D2D1_POINT_2F,
+                                          figure_begin: D2D1_FIGURE_BEGIN) {
+        let this = this as *mut PathfinderGeometrySink;
+        let start_point = PathfinderGeometrySink::d2d_point_2f_to_f32_point(&start_point);
+        (*this).commands.push(CubicPathCommand::MoveTo(start_point))
+    }
+
+    unsafe extern "system" fn Close(_: *mut IDWriteGeometrySink) -> HRESULT {
+        S_OK
+    }
+
+    unsafe extern "system" fn EndFigure(this: *mut IDWriteGeometrySink,
+                                        figure_end: D2D1_FIGURE_END) {
+        let this = this as *mut PathfinderGeometrySink;
+        if figure_end == D2D1_FIGURE_END_CLOSED {
+            (*this).commands.push(CubicPathCommand::ClosePath)
+        }
+    }
+
+    unsafe extern "system" fn SetFillMode(_: *mut IDWriteGeometrySink, _: D2D1_FILL_MODE) {
+        // TODO(pcwalton)
+    }
+
+    unsafe extern "system" fn SetSegmentFlags(_: *mut IDWriteGeometrySink, _: D2D1_PATH_SEGMENT) {
+        // Should be unused.
+    }
+
+    #[inline]
+    fn d2d_point_2f_to_f32_point(point: &D2D1_POINT_2F) -> Point2D<f32> {
+        Point2D::new(point.x, point.y)
+    }
 }
 
 // ---
