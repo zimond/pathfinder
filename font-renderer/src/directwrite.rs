@@ -241,6 +241,8 @@ impl FontContext {
                                                   CURVE_APPROX_ERROR_BOUND);
 
             let approx_commands: Vec<_> = approx_stream.collect();
+            println!("{:?}", approx_commands);
+
             Ok(approx_commands)
         }
     }
@@ -590,10 +592,11 @@ impl PathfinderGeometrySink {
         let beziers = slice::from_raw_parts(beziers, beziers_count as usize);
         for bezier in beziers {
             let control_point_0 =
-                PathfinderGeometrySink::d2d_point_2f_to_f32_point(&bezier.point1);
+                PathfinderGeometrySink::d2d_point_2f_to_flipped_f32_point(&bezier.point1);
             let control_point_1 =
-                PathfinderGeometrySink::d2d_point_2f_to_f32_point(&bezier.point2);
-            let endpoint = PathfinderGeometrySink::d2d_point_2f_to_f32_point(&bezier.point3);
+                PathfinderGeometrySink::d2d_point_2f_to_flipped_f32_point(&bezier.point2);
+            let endpoint =
+                PathfinderGeometrySink::d2d_point_2f_to_flipped_f32_point(&bezier.point3);
             (*this).commands.push(CubicPathCommand::CubicCurveTo(control_point_0,
                                                                  control_point_1,
                                                                  endpoint))
@@ -606,7 +609,7 @@ impl PathfinderGeometrySink {
         let this = this as *mut PathfinderGeometrySink;
         let points = slice::from_raw_parts(points, points_count as usize);
         for point in points {
-            let point = PathfinderGeometrySink::d2d_point_2f_to_f32_point(&point);
+            let point = PathfinderGeometrySink::d2d_point_2f_to_flipped_f32_point(&point);
             (*this).commands.push(CubicPathCommand::LineTo(point))
         }
     }
@@ -615,7 +618,7 @@ impl PathfinderGeometrySink {
                                           start_point: D2D1_POINT_2F,
                                           _: D2D1_FIGURE_BEGIN) {
         let this = this as *mut PathfinderGeometrySink;
-        let start_point = PathfinderGeometrySink::d2d_point_2f_to_f32_point(&start_point);
+        let start_point = PathfinderGeometrySink::d2d_point_2f_to_flipped_f32_point(&start_point);
         (*this).commands.push(CubicPathCommand::MoveTo(start_point))
     }
 
@@ -640,8 +643,8 @@ impl PathfinderGeometrySink {
     }
 
     #[inline]
-    fn d2d_point_2f_to_f32_point(point: &D2D1_POINT_2F) -> Point2D<f32> {
-        Point2D::new(point.x, point.y)
+    fn d2d_point_2f_to_flipped_f32_point(point: &D2D1_POINT_2F) -> Point2D<f32> {
+        Point2D::new(point.x, -point.y)
     }
 }
 
