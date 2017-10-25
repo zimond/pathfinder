@@ -90,7 +90,8 @@ pub type GlyphOutline = Vec<PathCommand>;
 
 const CURVE_APPROX_ERROR_BOUND: f32 = 0.1;
 
-static PATHFINDER_FONT_FILE_KEY: [u8; 6] = *b"MEMORY";
+static PATHFINDER_FONT_COLLECTION_KEY: [u8; 17] = *b"MEMORY_COLLECTION";
+static PATHFINDER_FONT_FILE_KEY: u64 = 0x123456789abcdef;
 
 pub struct FontContext {
     dwrite_factory: PathfinderComPtr<IDWriteFactory>,
@@ -130,13 +131,21 @@ impl FontContext {
         unsafe {
             let font_collection_loader = PathfinderFontCollectionLoader::new(bytes);
 
+            let result = (**self.dwrite_factory).RegisterFontCollectionLoader(
+                font_collection_loader.clone().into_raw() as *mut IDWriteFontCollectionLoader);
+            if !winerror::SUCCEEDED(result) {
+                println!("Failed to register custom font collection loader: {:x}", result);
+                return Err(())
+            }
+
             let mut font_collection = ptr::null_mut();
             let result = (**self.dwrite_factory).CreateCustomFontCollection(
                 font_collection_loader.clone().into_raw() as *mut IDWriteFontCollectionLoader,
-                PATHFINDER_FONT_FILE_KEY.as_ptr() as *const c_void,
-                PATHFINDER_FONT_FILE_KEY.len() as UINT32,
+                PATHFINDER_FONT_COLLECTION_KEY.as_ptr() as *const c_void,
+                PATHFINDER_FONT_COLLECTION_KEY.len() as UINT32,
                 &mut font_collection);
             if !winerror::SUCCEEDED(result) {
+                println!("Failed to create custom font collection: {:x}", result);
                 return Err(())
             }
             let font_collection = PathfinderComPtr::new(font_collection);
@@ -144,6 +153,7 @@ impl FontContext {
             let mut font_family = ptr::null_mut();
             let result = (**font_collection).GetFontFamily(0, &mut font_family);
             if !winerror::SUCCEEDED(result) {
+                println!("Failed to get font family");
                 return Err(())
             }
             let font_family = PathfinderComPtr::new(font_family);
@@ -151,6 +161,7 @@ impl FontContext {
             let mut font = ptr::null_mut();
             let result = (**font_family).GetFont(0, &mut font);
             if !winerror::SUCCEEDED(result) {
+                println!("Failed to get font");
                 return Err(())
             }
             let font = PathfinderComPtr::new(font);
@@ -158,6 +169,7 @@ impl FontContext {
             let mut font_face = ptr::null_mut();
             let result = (**font).CreateFontFace(&mut font_face);
             if !winerror::SUCCEEDED(result) {
+                println!("Failed to create font face");
                 return Err(())
             }
             let font_face = PathfinderComPtr::new(font_face);
@@ -276,21 +288,14 @@ impl PathfinderFontCollectionLoader {
             _: UINT32,
             font_file_enumerator: *mut *mut IDWriteFontFileEnumerator)
             -> HRESULT {
+        println!("CreateEnumeratorFromKey()");
+
         let this = this as *mut PathfinderFontCollectionLoader;
-        let font_file_loader = PathfinderFontFileLoader::new((*this).buffer.clone());
 
-        let mut font_file = ptr::null_mut();
-        let result = (*factory).CreateCustomFontFileReference(
-            PATHFINDER_FONT_FILE_KEY.as_ptr() as *const c_void,
-            PATHFINDER_FONT_FILE_KEY.len() as UINT32,
-            font_file_loader.into_raw() as *mut IDWriteFontFileLoader,
-            &mut font_file);
-        if !winerror::SUCCEEDED(result) {
-            return result
-        }
+        let factory = PathfinderComPtr::new(factory);
+        let buffer = (*this).buffer.clone();
+        let new_font_file_enumerator = PathfinderFontFileEnumerator::new(factory, buffer);
 
-        let font_file = PathfinderComPtr::new(font_file);
-        let new_font_file_enumerator = PathfinderFontFileEnumerator::new(font_file);
         *font_file_enumerator = new_font_file_enumerator.into_raw() as
             *mut IDWriteFontFileEnumerator;
         S_OK
@@ -300,7 +305,8 @@ impl PathfinderFontCollectionLoader {
 #[repr(C)]
 struct PathfinderFontFileEnumerator {
     object: PathfinderComObject<PathfinderFontFileEnumerator>,
-    file: PathfinderComPtr<IDWriteFontFile>,
+    factory: PathfinderComPtr<IDWriteFactory>,
+    buffer: Arc<Vec<u8>>,
     state: PathfinderFontFileEnumeratorState,
 }
 
@@ -332,12 +338,13 @@ impl PathfinderCoclass for PathfinderFontFileEnumerator {
 
 impl PathfinderFontFileEnumerator {
     #[inline]
-    fn new(file: PathfinderComPtr<IDWriteFontFile>)
+    fn new(factory: PathfinderComPtr<IDWriteFactory>, buffer: Arc<Vec<u8>>)
            -> PathfinderComPtr<PathfinderFontFileEnumerator> {
         unsafe {
             PathfinderComPtr::new(Box::into_raw(Box::new(PathfinderFontFileEnumerator {
                 object: PathfinderComObject::construct(),
-                file: file,
+                factory: factory,
+                buffer: buffer,
                 state: PathfinderFontFileEnumeratorState::Start,
             })))
         }
@@ -351,7 +358,29 @@ impl PathfinderFontFileEnumerator {
             *font_file = ptr::null_mut();
             return E_BOUNDS
         }
-        *font_file = (*this).file.clone().into_raw();
+
+        let font_file_loader = PathfinderFontFileLoader::new((*this).buffer.clone());
+        println!("loader {:x}", font_file_loader.clone().into_raw() as usize);
+
+        // FIXME(pcwalton): Unregister this!
+        let result = (**(*this).factory).RegisterFontFileLoader(
+            font_file_loader.clone().into_raw() as *mut IDWriteFontFileLoader);
+        if !winerror::SUCCEEDED(result) {
+            println!("Failed to register font file loader: {:x}", result);
+            return result
+        }
+
+        let result = (**(*this).factory).CreateCustomFontFileReference(
+            &PATHFINDER_FONT_FILE_KEY as *const u64 as *const c_void,
+            8,
+            font_file_loader.into_raw() as *mut IDWriteFontFileLoader,
+            font_file);
+        if !winerror::SUCCEEDED(result) {
+            println!("Failed to create custom font file reference: {:x}", result);
+            return result
+        }
+        println!("Successfully created custom font file reference!");
+
         S_OK
     }
 
@@ -412,10 +441,14 @@ impl PathfinderFontFileLoader {
             font_file_reference_key_size: UINT32,
             font_file_stream: *mut *mut IDWriteFontFileStream)
             -> HRESULT {
+        println!("CreateStreamFromKey()");
         let this = this as *mut PathfinderFontFileLoader;
-        let font_file_reference = slice::from_raw_parts(font_file_reference_key as *const u8,
-                                                        font_file_reference_key_size as usize);
+        // FIXME(pcwalton)
+        let font_file_reference = *(font_file_reference_key as *const u64);
         if font_file_reference != PATHFINDER_FONT_FILE_KEY {
+            println!("Bad font file reference! {:?} {:?}",
+                     font_file_reference,
+                     PATHFINDER_FONT_FILE_KEY);
             *font_file_stream = ptr::null_mut();
             return E_INVALIDARG
         }
@@ -657,6 +690,7 @@ impl<T> Drop for PathfinderComPtr<T> {
 
 impl<T> Deref for PathfinderComPtr<T> {
     type Target = *mut T;
+    #[inline]
     fn deref(&self) -> &*mut T {
         &self.ptr
     }
@@ -701,6 +735,7 @@ impl<DerivedClass> PathfinderComObject<DerivedClass> where DerivedClass: Pathfin
                                              riid: REFIID,
                                              object: *mut *mut c_void)
                                              -> HRESULT {
+        println!("QI()");
         if object.is_null() {
             return E_POINTER
         }
