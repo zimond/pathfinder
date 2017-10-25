@@ -1,4 +1,4 @@
-// pathfinder/font-renderer/src/directwrite.rs
+// pathfinder/font-renderer/src/directwrite/mod.rs
 //
 // Copyright © 2017 The Pathfinder Project Developers.
 //
@@ -17,14 +17,12 @@ use pathfinder_path_utils::PathCommand;
 use pathfinder_path_utils::cubic::{CubicPathCommand, CubicPathCommandApproxStream};
 use std::collections::BTreeMap;
 use std::mem;
-use std::ops::Deref;
 use std::os::raw::c_void;
 use std::ptr;
 use std::slice;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use uuid::{self, IID_ID2D1SimplifiedGeometrySink};
-use winapi::winerror::{self, E_NOINTERFACE, E_POINTER, S_OK};
+use uuid::IID_ID2D1SimplifiedGeometrySink;
+use winapi::winerror::{self, S_OK};
 use winapi::{self, BOOL, D2D1_BEZIER_SEGMENT, D2D1_FIGURE_BEGIN, D2D1_FIGURE_END};
 use winapi::{D2D1_FIGURE_END_CLOSED, D2D1_FILL_MODE, D2D1_PATH_SEGMENT, D2D1_POINT_2F};
 use winapi::{DWRITE_FONT_METRICS, DWRITE_GLYPH_METRICS, E_BOUNDS, E_INVALIDARG, FALSE, FILETIME};
@@ -33,9 +31,12 @@ use winapi::{IDWriteFontCollectionLoader, IDWriteFontCollectionLoaderVtbl, IDWri
 use winapi::{IDWriteFontFile, IDWriteFontFileEnumerator, IDWriteFontFileEnumeratorVtbl};
 use winapi::{IDWriteFontFileLoader, IDWriteFontFileLoaderVtbl, IDWriteFontFileStream};
 use winapi::{IDWriteFontFileStreamVtbl, IDWriteGdiInterop, IDWriteGeometrySink, IUnknown};
-use winapi::{IUnknownVtbl, REFIID, TRUE, UINT16, UINT32, UINT64, UINT, ULONG};
+use winapi::{IUnknownVtbl, TRUE, UINT16, UINT32, UINT64, UINT};
 
+use self::com::{PathfinderCoclass, PathfinderComObject, PathfinderComPtr};
 use {FontInstanceKey, FontKey, GlyphDimensions, GlyphKey};
+
+mod com;
 
 DEFINE_GUID! {
     IID_IDWriteFactory, 0xb859ee5a, 0xd838, 0x4b5b, 0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48
@@ -615,111 +616,4 @@ impl PathfinderGeometrySink {
     fn d2d_point_2f_to_flipped_f32_point(point: &D2D1_POINT_2F) -> Point2D<f32> {
         Point2D::new(point.x, -point.y)
     }
-}
-
-// ---
-
-struct PathfinderComPtr<T> {
-    ptr: *mut T,
-}
-
-impl<T> PathfinderComPtr<T> {
-    #[inline]
-    unsafe fn new(ptr: *mut T) -> PathfinderComPtr<T> {
-        PathfinderComPtr {
-            ptr: ptr,
-        }
-    }
-
-    #[inline]
-    fn into_raw(self) -> *mut T {
-        let ptr = self.ptr;
-        mem::forget(self);
-        ptr
-    }
-}
-
-impl<T> Clone for PathfinderComPtr<T> {
-    #[inline]
-    fn clone(&self) -> PathfinderComPtr<T> {
-        unsafe {
-            (*(self.ptr as *mut IUnknown)).AddRef();
-        }
-        PathfinderComPtr {
-            ptr: self.ptr,
-        }
-    }
-}
-
-impl<T> Drop for PathfinderComPtr<T> {
-    #[inline]
-    fn drop(&mut self) {
-        unsafe {
-            (*(self.ptr as *mut IUnknown)).Release();
-        }
-    }
-}
-
-impl<T> Deref for PathfinderComPtr<T> {
-    type Target = *mut T;
-    #[inline]
-    fn deref(&self) -> &*mut T {
-        &self.ptr
-    }
-}
-
-trait PathfinderCoclass {
-    type InterfaceVtable: 'static;
-    fn interface_guid() -> &'static GUID;
-    fn vtable() -> &'static Self::InterfaceVtable;
-}
-
-#[repr(C)]
-struct PathfinderComObject<DerivedClass> where DerivedClass: PathfinderCoclass {
-    vtable: &'static DerivedClass::InterfaceVtable,
-    ref_count: AtomicUsize,
-}
-
-impl<DerivedClass> PathfinderComObject<DerivedClass> where DerivedClass: PathfinderCoclass {
-    #[inline]
-    unsafe fn construct() -> PathfinderComObject<DerivedClass> {
-        PathfinderComObject {
-            vtable: DerivedClass::vtable(),
-            ref_count: AtomicUsize::new(1),
-        }
-    }
-
-    unsafe extern "system" fn AddRef(this: *mut IUnknown) -> ULONG {
-        let this = this as *mut PathfinderComObject<DerivedClass>;
-        ((*this).ref_count.fetch_add(1, Ordering::SeqCst) + 1) as ULONG
-    }
-
-    unsafe extern "system" fn Release(this: *mut IUnknown) -> ULONG {
-        let this = this as *mut PathfinderComObject<DerivedClass>;
-        let new_ref_count = (*this).ref_count.fetch_sub(1, Ordering::SeqCst) - 1;
-        if new_ref_count == 0 {
-            drop(Box::from_raw(this))
-        }
-        new_ref_count as ULONG
-    }
-
-    unsafe extern "system" fn QueryInterface(this: *mut IUnknown,
-                                             riid: REFIID,
-                                             object: *mut *mut c_void)
-                                             -> HRESULT {
-        if object.is_null() {
-            return E_POINTER
-        }
-        if guids_are_equal(&*riid, &uuid::IID_IUnknown) ||
-                guids_are_equal(&*riid, DerivedClass::interface_guid()) {
-            *object = this as *mut c_void;
-            return S_OK
-        }
-        *object = ptr::null_mut();
-        E_NOINTERFACE
-    }
-}
-
-fn guids_are_equal(a: &GUID, b: &GUID) -> bool {
-    a.Data1 == b.Data1 && a.Data2 == b.Data2 && a.Data3 == b.Data3 && a.Data4 == b.Data4
 }
