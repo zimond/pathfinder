@@ -10,61 +10,32 @@
 
 #![allow(non_snake_case, non_upper_case_globals)]
 
-use winapi::D2D1_FIGURE_END_CLOSED;
-use GlyphDimensions;
-use winapi::DWRITE_GLYPH_METRICS;
-use winapi::UINT16;
-use winapi::FLOAT;
-use winapi::DWRITE_FONT_METRICS;
-use GlyphKey;
-use FontInstanceKey;
-use pathfinder_path_utils::PathCommand;
-use winapi::D2D1_PATH_SEGMENT;
-use winapi::D2D1_FILL_MODE;
-use winapi::D2D1_FIGURE_END;
-use winapi::D2D1_FIGURE_BEGIN;
-use uuid::IID_ID2D1SimplifiedGeometrySink;
-use winapi::D2D1_POINT_2F;
-use winapi::UINT;
-use winapi::D2D1_BEZIER_SEGMENT;
-use winapi::ID2D1SimplifiedGeometrySinkVtbl;
-use winapi::IDWriteGeometrySink;
-use pathfinder_path_utils::cubic::CubicPathCommand;
-use winapi::IDWriteGdiInterop;
-use std::collections::BTreeMap;
-use winapi::IDWriteFontFace;
-use std::ops::Deref;
-use winapi::FALSE;
-use winapi::TRUE;
-use winapi::BOOL;
-use winapi::IDWriteFontFile;
-use winapi::E_INVALIDARG;
-use winapi::E_BOUNDS;
-use winapi::FILETIME;
-use winapi::UINT64;
-use winapi::ULONG;
-use winapi::IUnknownVtbl;
-use winapi::IDWriteFontFileStreamVtbl;
-use winapi::IDWriteFontFileLoaderVtbl;
-use winapi::IDWriteFontFileEnumeratorVtbl;
 use dwrite;
 use euclid::{Point2D, Size2D};
 use kernel32;
-use pathfinder_path_utils::cubic::CubicPathCommandApproxStream;
+use pathfinder_path_utils::PathCommand;
+use pathfinder_path_utils::cubic::{CubicPathCommand, CubicPathCommandApproxStream};
+use std::collections::BTreeMap;
 use std::mem;
+use std::ops::Deref;
 use std::os::raw::c_void;
 use std::ptr;
 use std::slice;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use uuid;
+use uuid::{self, IID_ID2D1SimplifiedGeometrySink};
 use winapi::winerror::{self, E_NOINTERFACE, E_POINTER, S_OK};
-use winapi::{self, GUID, HRESULT, IDWriteFactory, IDWriteFontCollectionLoader};
-use winapi::{IDWriteFontCollectionLoaderVtbl, IDWriteFontFileEnumerator, IDWriteFontFileLoader};
-use winapi::{IDWriteFontFileStream};
-use winapi::{IUnknown, REFIID, UINT32};
+use winapi::{self, BOOL, D2D1_BEZIER_SEGMENT, D2D1_FIGURE_BEGIN, D2D1_FIGURE_END};
+use winapi::{D2D1_FIGURE_END_CLOSED, D2D1_FILL_MODE, D2D1_PATH_SEGMENT, D2D1_POINT_2F};
+use winapi::{DWRITE_FONT_METRICS, DWRITE_GLYPH_METRICS, E_BOUNDS, E_INVALIDARG, FALSE, FILETIME};
+use winapi::{FLOAT, GUID, HRESULT, ID2D1SimplifiedGeometrySinkVtbl, IDWriteFactory};
+use winapi::{IDWriteFontCollectionLoader, IDWriteFontCollectionLoaderVtbl, IDWriteFontFace};
+use winapi::{IDWriteFontFile, IDWriteFontFileEnumerator, IDWriteFontFileEnumeratorVtbl};
+use winapi::{IDWriteFontFileLoader, IDWriteFontFileLoaderVtbl, IDWriteFontFileStream};
+use winapi::{IDWriteFontFileStreamVtbl, IDWriteGdiInterop, IDWriteGeometrySink, IUnknown};
+use winapi::{IUnknownVtbl, REFIID, TRUE, UINT16, UINT32, UINT64, UINT, ULONG};
 
-use FontKey;
+use {FontInstanceKey, FontKey, GlyphDimensions, GlyphKey};
 
 DEFINE_GUID! {
     IID_IDWriteFactory, 0xb859ee5a, 0xd838, 0x4b5b, 0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48
@@ -130,13 +101,10 @@ impl FontContext {
                                 -> Result<(), ()> {
         unsafe {
             let font_file_loader = PathfinderFontFileLoader::new(bytes.clone());
-            println!("loader {:x}", font_file_loader.clone().into_raw() as usize);
 
-            // FIXME(pcwalton): Unregister this!
             let result = (**self.dwrite_factory).RegisterFontFileLoader(
                 font_file_loader.clone().into_raw() as *mut IDWriteFontFileLoader);
             if !winerror::SUCCEEDED(result) {
-                println!("Failed to register font file loader: {:x}", result);
                 return Err(())
             }
 
@@ -144,21 +112,18 @@ impl FontContext {
             let result = (**self.dwrite_factory).CreateCustomFontFileReference(
                 PATHFINDER_FONT_FILE_KEY.as_ptr() as *const c_void,
                 PATHFINDER_FONT_FILE_KEY.len() as UINT,
-                font_file_loader.into_raw() as *mut IDWriteFontFileLoader,
+                font_file_loader.clone().into_raw() as *mut IDWriteFontFileLoader,
                 &mut font_file);
             if !winerror::SUCCEEDED(result) {
-                println!("Failed to create custom font file reference: {:x}", result);
                 return Err(())
             }
             let font_file = PathfinderComPtr::new(font_file);
-            println!("Successfully created custom font file reference!");
 
             let font_collection_loader = PathfinderFontCollectionLoader::new(font_file);
 
             let result = (**self.dwrite_factory).RegisterFontCollectionLoader(
                 font_collection_loader.clone().into_raw() as *mut IDWriteFontCollectionLoader);
             if !winerror::SUCCEEDED(result) {
-                println!("Failed to register custom font collection loader: {:x}", result);
                 return Err(())
             }
 
@@ -169,7 +134,6 @@ impl FontContext {
                 PATHFINDER_FONT_COLLECTION_KEY.len() as UINT32,
                 &mut font_collection);
             if !winerror::SUCCEEDED(result) {
-                println!("Failed to create custom font collection: {:x}", result);
                 return Err(())
             }
             let font_collection = PathfinderComPtr::new(font_collection);
@@ -177,7 +141,6 @@ impl FontContext {
             let mut font_family = ptr::null_mut();
             let result = (**font_collection).GetFontFamily(0, &mut font_family);
             if !winerror::SUCCEEDED(result) {
-                println!("Failed to get font family");
                 return Err(())
             }
             let font_family = PathfinderComPtr::new(font_family);
@@ -185,7 +148,6 @@ impl FontContext {
             let mut font = ptr::null_mut();
             let result = (**font_family).GetFont(0, &mut font);
             if !winerror::SUCCEEDED(result) {
-                println!("Failed to get font");
                 return Err(())
             }
             let font = PathfinderComPtr::new(font);
@@ -193,10 +155,21 @@ impl FontContext {
             let mut font_face = ptr::null_mut();
             let result = (**font).CreateFontFace(&mut font_face);
             if !winerror::SUCCEEDED(result) {
-                println!("Failed to create font face");
                 return Err(())
             }
             let font_face = PathfinderComPtr::new(font_face);
+
+            let result = (**self.dwrite_factory).UnregisterFontCollectionLoader(
+                font_collection_loader.into_raw() as *mut IDWriteFontCollectionLoader);
+            if !winerror::SUCCEEDED(result) {
+                return Err(())
+            }
+
+            let result = (**self.dwrite_factory).UnregisterFontFileLoader(
+                font_file_loader.into_raw() as *mut IDWriteFontFileLoader);
+            if !winerror::SUCCEEDED(result) {
+                return Err(())
+            }
 
             self.dwrite_font_faces.insert(*font_key, font_face);
             Ok(())
@@ -265,8 +238,6 @@ impl FontContext {
                                                   CURVE_APPROX_ERROR_BOUND);
 
             let approx_commands: Vec<_> = approx_stream.collect();
-            println!("{:?}", approx_commands);
-
             Ok(approx_commands)
         }
     }
@@ -315,8 +286,6 @@ impl PathfinderFontCollectionLoader {
             _: UINT32,
             font_file_enumerator: *mut *mut IDWriteFontFileEnumerator)
             -> HRESULT {
-        println!("CreateEnumeratorFromKey()");
-
         let this = this as *mut PathfinderFontCollectionLoader;
 
         let factory = PathfinderComPtr::new(factory);
@@ -447,14 +416,10 @@ impl PathfinderFontFileLoader {
             font_file_reference_key_size: UINT32,
             font_file_stream: *mut *mut IDWriteFontFileStream)
             -> HRESULT {
-        println!("CreateStreamFromKey()");
         let this = this as *mut PathfinderFontFileLoader;
         let font_file_reference = slice::from_raw_parts(font_file_reference_key as *const u8,
                                                         font_file_reference_key_size as usize);
         if font_file_reference != PATHFINDER_FONT_FILE_KEY {
-            println!("Bad font file reference! {:?} {:?}",
-                     font_file_reference,
-                     PATHFINDER_FONT_FILE_KEY);
             *font_file_stream = ptr::null_mut();
             return E_INVALIDARG
         }
@@ -742,7 +707,6 @@ impl<DerivedClass> PathfinderComObject<DerivedClass> where DerivedClass: Pathfin
                                              riid: REFIID,
                                              object: *mut *mut c_void)
                                              -> HRESULT {
-        println!("QI()");
         if object.is_null() {
             return E_POINTER
         }
