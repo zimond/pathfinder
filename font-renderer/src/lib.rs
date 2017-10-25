@@ -45,15 +45,15 @@ use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
 
 #[cfg(all(target_os = "macos", not(feature = "freetype")))]
 pub use core_graphics::FontContext;
+#[cfg(all(target_os = "windows", not(feature = "freetype")))]
+pub use directwrite::FontContext;
 #[cfg(any(target_os = "linux", feature = "freetype"))]
 pub use freetype::FontContext;
 
 #[cfg(all(target_os = "macos", not(feature = "freetype")))]
 mod core_graphics;
-
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(feature = "freetype")))]
 mod directwrite;
-
 #[cfg(any(target_os = "linux", feature = "freetype"))]
 mod freetype;
 

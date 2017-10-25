@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(non_snake_case, non_upper_case_globals)]
+
 use winapi::D2D1_FIGURE_END_CLOSED;
 use GlyphDimensions;
 use winapi::DWRITE_GLYPH_METRICS;
@@ -22,7 +24,6 @@ use winapi::D2D1_FILL_MODE;
 use winapi::D2D1_FIGURE_END;
 use winapi::D2D1_FIGURE_BEGIN;
 use uuid::IID_ID2D1SimplifiedGeometrySink;
-use winapi::ID2D1SimplifiedGeometrySink;
 use winapi::D2D1_POINT_2F;
 use winapi::UINT;
 use winapi::D2D1_BEZIER_SEGMENT;
@@ -77,9 +78,6 @@ DEFINE_GUID! {
     0x72755049, 0x5ff7, 0x435d, 0x83, 0x48, 0x4b, 0xe9, 0x7c, 0xfa, 0x6c, 0x7c
 }
 DEFINE_GUID! {
-    IID_IDWriteFontFile, 0x739d886a, 0xcef5, 0x47dc, 0x87, 0x69, 0x1a, 0x8b, 0x41, 0xbe, 0xbb, 0xb0
-}
-DEFINE_GUID! {
     IID_IDWriteFontFileLoader,
     0x727cad4e, 0xd6af, 0x4c9e, 0x8a, 0x08, 0xd6, 0x95, 0xb1, 0x1c, 0xaa, 0x49
 }
@@ -96,6 +94,7 @@ static PATHFINDER_FONT_FILE_KEY: [u8; 6] = *b"MEMORY";
 
 pub struct FontContext {
     dwrite_factory: PathfinderComPtr<IDWriteFactory>,
+    #[allow(unused)]
     dwrite_gdi_interop: PathfinderComPtr<IDWriteGdiInterop>,
     dwrite_font_faces: BTreeMap<FontKey, PathfinderComPtr<IDWriteFontFace>>,
 }
@@ -199,7 +198,7 @@ impl FontContext {
     }
 
     pub fn glyph_outline(&mut self, font_instance: &FontInstanceKey, glyph_key: &GlyphKey)
-                         -> Result<Vec<PathCommand>, ()> {
+                         -> Result<GlyphOutline, ()> {
         unsafe {
             let font_face = match self.dwrite_font_faces.get(&font_instance.font_key) {
                 None => return Err(()),
@@ -221,6 +220,9 @@ impl FontContext {
                                                  FALSE,
                                                  FALSE,
                                                  *geometry_sink as *mut IDWriteGeometrySink);
+            if !winerror::SUCCEEDED(result) {
+                return Err(())
+            }
 
             let approx_stream =
                 CubicPathCommandApproxStream::new((**geometry_sink).commands.iter().cloned(),
@@ -232,6 +234,7 @@ impl FontContext {
     }
 }
 
+#[repr(C)]
 struct PathfinderFontCollectionLoader {
     object: PathfinderComObject<PathfinderFontCollectionLoader>,
     buffer: Arc<Vec<u8>>,
@@ -269,8 +272,8 @@ impl PathfinderFontCollectionLoader {
     unsafe extern "system" fn CreateEnumeratorFromKey(
             this: *mut IDWriteFontCollectionLoader,
             factory: *mut IDWriteFactory,
-            collection_key: *const c_void,
-            collection_key_size: UINT32,
+            _: *const c_void,
+            _: UINT32,
             font_file_enumerator: *mut *mut IDWriteFontFileEnumerator)
             -> HRESULT {
         let this = this as *mut PathfinderFontCollectionLoader;
@@ -294,6 +297,7 @@ impl PathfinderFontCollectionLoader {
     }
 }
 
+#[repr(C)]
 struct PathfinderFontFileEnumerator {
     object: PathfinderComObject<PathfinderFontFileEnumerator>,
     file: PathfinderComPtr<IDWriteFontFile>,
@@ -370,6 +374,7 @@ impl PathfinderFontFileEnumerator {
     }
 }
 
+#[repr(C)]
 struct PathfinderFontFileLoader {
     object: PathfinderComObject<PathfinderFontFileLoader>,
     buffer: Arc<Vec<u8>>,
@@ -421,6 +426,7 @@ impl PathfinderFontFileLoader {
     }
 }
 
+#[repr(C)]
 struct PathfinderFontFileStream {
     object: PathfinderComObject<PathfinderFontFileStream>,
     buffer: Arc<Vec<u8>>,
@@ -499,12 +505,13 @@ impl PathfinderFontFileStream {
     }
 
     unsafe extern "system" fn ReleaseFileFragment(this: *mut IDWriteFontFileStream,
-                                                  fragment_context: *mut c_void) {
+                                                  _: *mut c_void) {
         let this = this as *mut PathfinderFontFileStream;
         (*(this as *mut IUnknown)).Release();
     }
 }
 
+#[repr(C)]
 struct PathfinderGeometrySink {
     object: PathfinderComObject<PathfinderGeometrySink>,
     commands: Vec<CubicPathCommand>,
@@ -573,7 +580,7 @@ impl PathfinderGeometrySink {
 
     unsafe extern "system" fn BeginFigure(this: *mut IDWriteGeometrySink,
                                           start_point: D2D1_POINT_2F,
-                                          figure_begin: D2D1_FIGURE_BEGIN) {
+                                          _: D2D1_FIGURE_BEGIN) {
         let this = this as *mut PathfinderGeometrySink;
         let start_point = PathfinderGeometrySink::d2d_point_2f_to_f32_point(&start_point);
         (*this).commands.push(CubicPathCommand::MoveTo(start_point))
@@ -661,6 +668,7 @@ trait PathfinderCoclass {
     fn vtable() -> &'static Self::InterfaceVtable;
 }
 
+#[repr(C)]
 struct PathfinderComObject<DerivedClass> where DerivedClass: PathfinderCoclass {
     vtable: &'static DerivedClass::InterfaceVtable,
     ref_count: AtomicUsize,
