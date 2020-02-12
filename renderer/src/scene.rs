@@ -23,26 +23,60 @@ use pathfinder_content::outline::Outline;
 
 #[derive(Clone)]
 pub struct Scene {
-    pub(crate) paths: Vec<PathObject>,
+    pub(crate) draw_paths: Vec<DrawPath>,
+    pub(crate) clip_paths: Vec<NamedPath>,
     palette: Palette,
     bounds: RectF,
     view_box: RectF,
 }
 
+// TODO(pcwalton): Add a composite op here.
+#[derive(Clone, Debug)]
+pub struct DrawPath {
+    path: NamedPath,
+    paint: PaintId,
+    clip_path: Option<ClipPathId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NamedPath {
+    outline: Outline,
+    name: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum PathId {
+    Draw(u32),
+    Clip(u32),
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ClipPathId(pub u32);
+
 impl Scene {
     #[inline]
     pub fn new() -> Scene {
         Scene {
-            paths: vec![],
+            draw_paths: vec![],
+            clip_paths: vec![],
             palette: Palette::new(),
             bounds: RectF::default(),
             view_box: RectF::default(),
         }
     }
 
-    pub fn push_path(&mut self, path: PathObject) {
-        self.bounds = self.bounds.union_rect(path.outline.bounds());
-        self.paths.push(path);
+    pub fn push_draw_path(&mut self, path: DrawPath) {
+        self.bounds = self.bounds.union_rect(path.outline().bounds());
+        self.draw_paths.push(path);
+    }
+
+    pub fn push_clip_path(&mut self, clip_path: NamedPath) -> ClipPathId {
+        // FIXME(pcwalton): Is this right?
+        self.bounds = self.bounds.union_rect(clip_path.outline.bounds());
+
+        let path_index = self.clip_paths.len() as u32;
+        self.clip_paths.push(clip_path);
+        ClipPathId(path_index)
     }
 
     #[inline]
@@ -56,8 +90,8 @@ impl Scene {
     }
 
     #[inline]
-    pub fn path_count(&self) -> usize {
-        self.paths.len()
+    pub fn draw_path_count(&self) -> usize {
+        self.draw_paths.len()
     }
 
     #[inline]
@@ -133,13 +167,13 @@ impl Scene {
     }
 
     pub fn monochrome_color(&self) -> Option<ColorU> {
-        if self.paths.is_empty() {
+        if self.draw_paths.is_empty() {
             return None;
         }
 
-        let first_paint_id = self.paths[0].paint;
+        let first_paint_id = self.draw_paths[0].paint;
         if self
-            .paths
+            .draw_paths
             .iter()
             .skip(1)
             .any(|path_object| path_object.paint != first_paint_id) {
@@ -171,15 +205,18 @@ impl Scene {
         let prepared_options = options.prepare(self.bounds);
         SceneBuilder::new(self, &prepared_options, listener).build(executor)
     }
-    
+
+    /*
     pub fn paths<'a>(&'a self) -> PathIter {
         PathIter {
             scene: self,
             pos: 0
         }
     }
+    */
 }
 
+/*
 pub struct PathIter<'a> {
     scene: &'a Scene,
     pos: usize
@@ -199,27 +236,38 @@ impl<'a> Iterator for PathIter<'a> {
         item
     }
 }
+*/
 
-#[derive(Clone, Debug)]
-pub struct PathObject {
-    outline: Outline,
-    paint: PaintId,
-    name: String,
-}
-
-impl PathObject {
+impl DrawPath {
     #[inline]
-    pub fn new(outline: Outline, paint: PaintId, name: String) -> PathObject {
-        PathObject { outline, paint, name }
+    pub fn new(path: NamedPath, paint: PaintId, clip_path: Option<ClipPathId>) -> DrawPath {
+        DrawPath { path, paint, clip_path }
     }
 
     #[inline]
     pub fn outline(&self) -> &Outline {
-        &self.outline
+        &self.path.outline
     }
 
     #[inline]
     pub(crate) fn paint(&self) -> PaintId {
         self.paint
+    }
+
+    #[inline]
+    pub(crate) fn clip_path(&self) -> Option<ClipPathId> {
+        self.clip_path
+    }
+}
+
+impl NamedPath {
+    #[inline]
+    pub fn new(outline: Outline, name: String) -> NamedPath {
+        NamedPath { outline, name }
+    }
+
+    #[inline]
+    pub fn outline(&self) -> &Outline {
+        &self.outline
     }
 }

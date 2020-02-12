@@ -19,6 +19,8 @@ SHADERS=\
 	stencil.vs.glsl \
 	tile_alpha.fs.glsl \
 	tile_alpha.vs.glsl \
+	tile_clip.fs.glsl \
+	tile_clip.vs.glsl \
 	tile_solid.fs.glsl \
 	tile_solid.vs.glsl \
 	$(EMPTY)

@@ -22,7 +22,7 @@ use pathfinder_geometry::vector::Vector2F;
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::transform2d::Transform2F;
 use pathfinder_renderer::paint::{Paint, PaintId};
-use pathfinder_renderer::scene::{PathObject, Scene};
+use pathfinder_renderer::scene::{ClipPathId, DrawPath, NamedPath, Scene};
 use std::borrow::Cow;
 use std::default::Default;
 use std::f32::consts::PI;
@@ -173,9 +173,11 @@ impl CanvasRenderingContext2D {
 
         let mut stroke_style = self.current_state.resolve_stroke_style();
         
-        // the smaller scale is relevant here, as we multiply by it and want to ensure it is always bigger than HAIRLINE_STROKE_WIDTH
-        let transform_scale = f32::min(self.current_state.transform.m11(), self.current_state.transform.m22());
-        // avoid the division in the normal case of sufficient thickness
+        // The smaller scale is relevant here, as we multiply by it and want to ensure it is always
+        // bigger than `HAIRLINE_STROKE_WIDTH`.
+        let transform_scale = f32::min(self.current_state.transform.m11(),
+                                       self.current_state.transform.m22());
+        // Avoid the division in the normal case of sufficient thickness.
         if stroke_style.line_width * transform_scale < HAIRLINE_STROKE_WIDTH {
             stroke_style.line_width = HAIRLINE_STROKE_WIDTH / transform_scale;
         }
@@ -204,10 +206,24 @@ impl CanvasRenderingContext2D {
 
             let mut outline = outline.clone();
             outline.transform(&Transform2F::from_translation(self.current_state.shadow_offset));
-            self.scene.push_path(PathObject::new(outline, paint_id, String::new()))
+            self.scene.push_draw_path(DrawPath::new(NamedPath::new(outline, String::new()),
+                                                    paint_id,
+                                                    self.current_state.clip_path));
         }
 
-        self.scene.push_path(PathObject::new(outline, paint_id, String::new()))
+        self.scene.push_draw_path(DrawPath::new(NamedPath::new(outline, String::new()),
+                                                paint_id,
+                                                self.current_state.clip_path));
+    }
+
+    // Clipping
+
+    pub fn clip_path(&mut self, path: Path2D) {
+        let mut outline = path.into_outline();
+        outline.transform(&self.current_state.transform);
+
+        let clip_path_id = self.scene.push_clip_path(NamedPath::new(outline, String::new()));
+        self.current_state.clip_path = Some(clip_path_id);
     }
 
     // Transformations
@@ -271,6 +287,7 @@ struct State {
     shadow_offset: Vector2F,
     text_align: TextAlign,
     global_alpha: f32,
+    clip_path: Option<ClipPathId>,
 }
 
 impl State {
@@ -291,6 +308,7 @@ impl State {
             shadow_offset: Vector2F::default(),
             text_align: TextAlign::Left,
             global_alpha: 1.0,
+            clip_path: None,
         }
     }
 

@@ -10,8 +10,9 @@
 
 use crate::builder::SceneBuilder;
 use crate::gpu::renderer::MASK_TILES_ACROSS;
-use crate::gpu_data::{AlphaTile, AlphaTileVertex, BuiltObject, TileObjectPrimitive};
+use crate::gpu_data::{AlphaTile, AlphaTileVertex, BuiltObject, RenderStage, TileObjectPrimitive};
 use crate::paint::PaintMetadata;
+use crate::scene::PathId;
 use pathfinder_content::outline::{Contour, Outline, PointIndex};
 use pathfinder_content::segment::Segment;
 use pathfinder_content::sorted_vector::SortedVector;
@@ -20,6 +21,7 @@ use pathfinder_geometry::rect::{RectF, RectI};
 use pathfinder_geometry::vector::{Vector2F, Vector2I};
 use std::cmp::Ordering;
 use std::mem;
+use std::u16;
 
 // TODO(pcwalton): Make this configurable.
 const FLATTENING_TOLERANCE: f32 = 0.1;
@@ -29,37 +31,36 @@ pub const TILE_HEIGHT: u32 = 16;
 
 pub(crate) struct Tiler<'a> {
     builder: &'a SceneBuilder<'a>,
-    outline: &'a Outline,
     pub built_object: BuiltObject,
-    paint_metadata: &'a PaintMetadata,
-    object_index: u16,
+    path_info: TilingPathInfo<'a>,
 
     point_queue: SortedVector<QueuedEndpoint>,
     active_edges: SortedVector<ActiveEdge>,
     old_active_edges: Vec<ActiveEdge>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct TilingPathInfo<'a> {
+    pub(crate) outline: &'a Outline,
+    pub(crate) id: PathId,
+    pub(crate) paint_metadata: Option<&'a PaintMetadata>,
+    pub(crate) render_stage: RenderStage,
+}
+
 impl<'a> Tiler<'a> {
     #[allow(clippy::or_fun_call)]
     pub(crate) fn new(
         builder: &'a SceneBuilder<'a>,
-        outline: &'a Outline,
         view_box: RectF,
-        object_index: u16,
-        paint_metadata: &'a PaintMetadata,
+        path_info: TilingPathInfo<'a>,
     ) -> Tiler<'a> {
-        let bounds = outline
-            .bounds()
-            .intersection(view_box)
-            .unwrap_or(RectF::default());
-        let built_object = BuiltObject::new(bounds);
+        let bounds = path_info.outline.bounds().intersection(view_box).unwrap_or(RectF::default());
+        let built_object = BuiltObject::new(bounds, path_info.render_stage);
 
         Tiler {
             builder,
-            outline,
             built_object,
-            object_index,
-            paint_metadata,
+            path_info,
 
             point_queue: SortedVector::new(),
             active_edges: SortedVector::new(),
@@ -82,7 +83,7 @@ impl<'a> Tiler<'a> {
         }
 
         // Pack and cull.
-        self.pack_and_cull();
+        self.pack_and_cull_if_necessary();
 
         // Done!
         debug!("{:#?}", self.built_object);
@@ -107,7 +108,16 @@ impl<'a> Tiler<'a> {
         }
     }
 
-    fn pack_and_cull(&mut self) {
+    fn pack_and_cull_if_necessary(&mut self) {
+        let (object_index, paint_metadata) =
+            match (self.path_info.id, self.path_info.paint_metadata) {
+                (PathId::Draw(index), Some(paint_metadata)) => {
+                    debug_assert!(index <= u16::MAX as u32);
+                    (index as u16, paint_metadata)
+                }
+                _ => return,
+            };
+
         for (tile_index, tile) in self.built_object.tiles.data.iter().enumerate() {
             let tile_coords = self
                 .built_object
@@ -120,8 +130,8 @@ impl<'a> Tiler<'a> {
                 }
 
                 // If this is a solid tile, poke it into the Z-buffer and stop here.
-                if self.paint_metadata.is_opaque {
-                    self.builder.z_buffer.update(tile_coords, self.object_index);
+                if paint_metadata.is_opaque {
+                    self.builder.z_buffer.update(tile_coords, object_index);
                     continue;
                 }
             }
@@ -130,27 +140,27 @@ impl<'a> Tiler<'a> {
                 upper_left: AlphaTileVertex::new(tile_coords,
                                                  tile.alpha_tile_index as u16,
                                                  Vector2I::default(),
-                                                 self.object_index,
+                                                 object_index,
                                                  tile.backdrop as i16,
-                                                 &self.paint_metadata),
+                                                 paint_metadata),
                 upper_right: AlphaTileVertex::new(tile_coords,
                                                   tile.alpha_tile_index as u16,
-                                                 Vector2I::new(1, 0),
-                                                  self.object_index,
+                                                  Vector2I::new(1, 0),
+                                                  object_index,
                                                   tile.backdrop as i16,
-                                                  &self.paint_metadata),
+                                                  paint_metadata),
                 lower_left: AlphaTileVertex::new(tile_coords,
                                                  tile.alpha_tile_index as u16,
                                                  Vector2I::new(0, 1),
-                                                 self.object_index,
+                                                 object_index,
                                                  tile.backdrop as i16,
-                                                 &self.paint_metadata),
+                                                 paint_metadata),
                 lower_right: AlphaTileVertex::new(tile_coords,
                                                   tile.alpha_tile_index as u16,
                                                   Vector2I::splat(1),
-                                                  self.object_index,
+                                                  object_index,
                                                   tile.backdrop as i16,
-                                                  &self.paint_metadata),
+                                                  paint_metadata),
             });
         }
     }
@@ -271,7 +281,7 @@ impl<'a> Tiler<'a> {
     }
 
     fn add_new_active_edge(&mut self, tile_y: i32) {
-        let outline = &self.outline;
+        let outline = &self.path_info.outline;
         let point_index = self.point_queue.pop().unwrap().point_index;
 
         let contour = &outline.contours()[point_index.contour() as usize];
@@ -340,7 +350,7 @@ impl<'a> Tiler<'a> {
     fn init_point_queue(&mut self) {
         // Find MIN points.
         self.point_queue.clear();
-        for (contour_index, contour) in self.outline.contours().iter().enumerate() {
+        for (contour_index, contour) in self.path_info.outline.contours().iter().enumerate() {
             let contour_index = contour_index as u32;
             let mut cur_endpoint_index = 0;
             let mut prev_endpoint_index = contour.prev_endpoint_index_of(cur_endpoint_index);

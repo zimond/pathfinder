@@ -11,6 +11,7 @@
 //! Packed data ready to be sent to the GPU.
 
 use crate::options::BoundingQuad;
+use crate::scene::PathId;
 use crate::tile_map::DenseTileMap;
 use pathfinder_color::ColorU;
 use pathfinder_geometry::line_segment::{LineSegmentU4, LineSegmentU8};
@@ -23,8 +24,17 @@ use std::time::Duration;
 pub(crate) struct BuiltObject {
     pub bounds: RectF,
     pub fills: Vec<FillBatchPrimitive>,
-    pub alpha_tiles: Vec<AlphaTile>,
     pub tiles: DenseTileMap<TileObjectPrimitive>,
+    pub alpha_tiles: Vec<AlphaTile>,
+    pub render_stage: RenderStage,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum RenderStage {
+    // Draws clips and clipped paths.
+    Stage0,
+    // Draws paths to screen.
+    Stage1,
 }
 
 pub enum RenderCommand {
@@ -32,8 +42,8 @@ pub enum RenderCommand {
     AddPaintData(PaintData),
     AddFills(Vec<FillBatchPrimitive>),
     FlushFills,
-    AlphaTile(Vec<AlphaTile>),
-    SolidTile(Vec<SolidTileVertex>),
+    DrawAlphaTiles(Vec<AlphaTile>),
+    DrawSolidTiles(Vec<SolidTileVertex>),
     Finish { build_time: Duration },
 }
 
@@ -110,11 +120,11 @@ impl Debug for RenderCommand {
             }
             RenderCommand::AddFills(ref fills) => write!(formatter, "AddFills(x{})", fills.len()),
             RenderCommand::FlushFills => write!(formatter, "FlushFills"),
-            RenderCommand::AlphaTile(ref tiles) => {
-                write!(formatter, "AlphaTile(x{})", tiles.len())
+            RenderCommand::DrawAlphaTiles(ref tiles) => {
+                write!(formatter, "DrawAlphaTiles(x{})", tiles.len())
             }
-            RenderCommand::SolidTile(ref tiles) => {
-                write!(formatter, "SolidTile(x{})", tiles.len())
+            RenderCommand::DrawSolidTiles(ref tiles) => {
+                write!(formatter, "DrawSolidTiles(x{})", tiles.len())
             }
             RenderCommand::Finish { .. } => write!(formatter, "Finish"),
         }
