@@ -13,7 +13,6 @@
 precision highp float;
 
 uniform sampler2D uMaskTexture;
-uniform sampler2D uClipTexture;
 
 in vec2 vMaskTexCoord;
 in vec2 vClipTexCoord;
@@ -25,6 +24,6 @@ out vec4 oFragColor;
 void main() {
     // FIXME(#266, pcwalton): Clamp and use fill rule.
     float maskCoverage = abs(texture(uMaskTexture, vMaskTexCoord).r + vMaskBackdrop);
-    float clipCoverage = abs(texture(uClipTexture, vClipTexCoord).r + vClipBackdrop);
+    float clipCoverage = abs(texture(uMaskTexture, vClipTexCoord).r + vClipBackdrop);
     gl_FragColor = vec4(min(maskCoverage, clipCoverage));
 }

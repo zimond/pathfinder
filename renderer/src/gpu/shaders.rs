@@ -16,6 +16,7 @@ use pathfinder_gpu::resources::ResourceLoader;
 const FILL_INSTANCE_SIZE: usize = 8;
 const SOLID_TILE_VERTEX_SIZE: usize = 12;
 const MASK_TILE_VERTEX_SIZE: usize = 16;
+const CLIP_TILE_VERTEX_SIZE: usize = 16;
 
 pub const MAX_FILLS_PER_BATCH: usize = 0x4000;
 
@@ -156,7 +157,7 @@ where
             divisor: 0,
             buffer_index: 0,
         });
-        device.configure_vertex_attr(&vertex_array, &color_tex_coord_attr, &VertexAttrDescriptor {
+        device.configure_vertex_attr(&vertex_array, &mask_tex_coord_attr, &VertexAttrDescriptor {
             size: 2,
             class: VertexAttrClass::FloatNorm,
             attr_type: VertexAttrType::U16,
@@ -165,7 +166,7 @@ where
             divisor: 0,
             buffer_index: 0,
         });
-        device.configure_vertex_attr(&vertex_array, &mask_tex_coord_attr, &VertexAttrDescriptor {
+        device.configure_vertex_attr(&vertex_array, &color_tex_coord_attr, &VertexAttrDescriptor {
             size: 2,
             class: VertexAttrClass::FloatNorm,
             attr_type: VertexAttrType::U16,
@@ -239,6 +240,87 @@ where
         device.bind_buffer(&vertex_array, quads_vertex_indices_buffer, BufferTarget::Index);
 
         SolidTileVertexArray { vertex_array, vertex_buffer }
+    }
+}
+
+pub struct ClipTileVertexArray<D>
+where
+    D: Device,
+{
+    pub vertex_array: D::VertexArray,
+    pub vertex_buffer: D::Buffer,
+}
+
+impl<D> ClipTileVertexArray<D>
+where
+    D: Device,
+{
+    pub fn new(device: &D,
+               clip_tile_program: &ClipTileProgram<D>,
+               quads_vertex_indices_buffer: &D::Buffer)
+               -> ClipTileVertexArray<D> {
+        let (vertex_array, vertex_buffer) = (device.create_vertex_array(), device.create_buffer());
+
+        let tile_position_attr =
+            device.get_vertex_attr(&clip_tile_program.program, "TilePosition").unwrap();
+        let mask_tex_coord_attr = device.get_vertex_attr(&clip_tile_program.program,
+                                                         "MaskTexCoord").unwrap();
+        let clip_tex_coord_attr = device.get_vertex_attr(&clip_tile_program.program,
+                                                         "ClipTexCoord").unwrap();
+        let mask_backdrop_attr = device.get_vertex_attr(&clip_tile_program.program,
+                                                        "MaskBackdrop").unwrap();
+        let clip_backdrop_attr = device.get_vertex_attr(&clip_tile_program.program,
+                                                        "ClipBackdrop").unwrap();
+
+        device.bind_buffer(&vertex_array, &vertex_buffer, BufferTarget::Vertex);
+        device.configure_vertex_attr(&vertex_array, &tile_position_attr, &VertexAttrDescriptor {
+            size: 2,
+            class: VertexAttrClass::FloatNorm,
+            attr_type: VertexAttrType::U16,
+            stride: CLIP_TILE_VERTEX_SIZE,
+            offset: 0,
+            divisor: 0,
+            buffer_index: 0,
+        });
+        device.configure_vertex_attr(&vertex_array, &mask_tex_coord_attr, &VertexAttrDescriptor {
+            size: 2,
+            class: VertexAttrClass::FloatNorm,
+            attr_type: VertexAttrType::U16,
+            stride: CLIP_TILE_VERTEX_SIZE,
+            offset: 4,
+            divisor: 0,
+            buffer_index: 0,
+        });
+        device.configure_vertex_attr(&vertex_array, &clip_tex_coord_attr, &VertexAttrDescriptor {
+            size: 2,
+            class: VertexAttrClass::FloatNorm,
+            attr_type: VertexAttrType::U16,
+            stride: CLIP_TILE_VERTEX_SIZE,
+            offset: 8,
+            divisor: 0,
+            buffer_index: 0,
+        });
+        device.configure_vertex_attr(&vertex_array, &mask_backdrop_attr, &VertexAttrDescriptor {
+            size: 1,
+            class: VertexAttrClass::Int,
+            attr_type: VertexAttrType::I16,
+            stride: CLIP_TILE_VERTEX_SIZE,
+            offset: 12,
+            divisor: 0,
+            buffer_index: 0,
+        });
+        device.configure_vertex_attr(&vertex_array, &clip_backdrop_attr, &VertexAttrDescriptor {
+            size: 1,
+            class: VertexAttrClass::Int,
+            attr_type: VertexAttrType::I16,
+            stride: CLIP_TILE_VERTEX_SIZE,
+            offset: 14,
+            divisor: 0,
+            buffer_index: 0,
+        });
+        device.bind_buffer(&vertex_array, quads_vertex_indices_buffer, BufferTarget::Index);
+
+        ClipTileVertexArray { vertex_array, vertex_buffer }
     }
 }
 
@@ -323,6 +405,21 @@ impl<D> AlphaTileProgram<D> where D: Device {
             paint_texture_uniform,
             paint_texture_size_uniform,
         }
+    }
+}
+
+pub struct ClipTileProgram<D> where D: Device {
+    pub program: D::Program,
+    pub tile_size_uniform: D::Uniform,
+    pub mask_texture_uniform: D::Uniform,
+}
+
+impl<D> ClipTileProgram<D> where D: Device {
+    pub fn new(device: &D, resources: &dyn ResourceLoader) -> ClipTileProgram<D> {
+        let program = device.create_program(resources, "tile_clip");
+        let tile_size_uniform = device.get_uniform(&program, "TileSize");
+        let mask_texture_uniform = device.get_uniform(&program, "MaskTexture");
+        ClipTileProgram { program, tile_size_uniform, mask_texture_uniform }
     }
 }
 

@@ -11,19 +11,19 @@
 //! Packs data onto the GPU.
 
 use crate::concurrent::executor::Executor;
-use crate::gpu_data::{AlphaTile, BuiltObject, FillBatchPrimitive, RenderCommand, RenderStage};
+use crate::gpu_data::{AlphaTile, FillBatchPrimitive, RenderCommand};
+use crate::gpu_data::{RenderStage, TileObjectPrimitive};
 use crate::options::{PreparedBuildOptions, RenderCommandListener};
 use crate::paint::{PaintInfo, PaintMetadata};
-use crate::scene::{PathId, Scene};
+use crate::scene::{ClipPathId, DrawPathId, Scene};
 use crate::tile_map::DenseTileMap;
-use crate::tiles::{self, TILE_HEIGHT, TILE_WIDTH, Tiler, TilingPathInfo};
+use crate::tiles::{self, TILE_HEIGHT, TILE_WIDTH, Tiler, TilingPaintClipInfo, TilingPathInfo};
 use crate::z_buffer::ZBuffer;
 use pathfinder_geometry::line_segment::{LineSegment2F, LineSegmentU4, LineSegmentU8};
 use pathfinder_geometry::vector::{Vector2F, Vector2I};
 use pathfinder_geometry::rect::{RectF, RectI};
 use pathfinder_geometry::util;
 use pathfinder_simd::default::{F32x4, I32x4};
-use std::i16;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use std::u16;
@@ -61,11 +61,11 @@ impl<'a> SceneBuilder<'a> {
     pub fn build<E>(&mut self, executor: &E) where E: Executor {
         let start_time = Instant::now();
 
-        let bounding_quad = self.built_options.bounding_quad();
         let draw_path_count = self.scene.draw_paths.len();
         let clip_path_count = self.scene.clip_paths.len();
         let total_path_count = draw_path_count + clip_path_count;
 
+        let bounding_quad = self.built_options.bounding_quad();
         self.listener.send(RenderCommand::Start { bounding_quad, path_count: total_path_count });
 
         let PaintInfo {
@@ -75,94 +75,142 @@ impl<'a> SceneBuilder<'a> {
         self.listener.send(RenderCommand::AddPaintData(paint_data));
 
         let effective_view_box = self.scene.effective_view_box(self.built_options);
-        let alpha_tiles = executor.flatten_into_vector(total_path_count, |path_index| {
-            self.build_path(path_index,
-                            effective_view_box,
-                            &self.built_options,
-                            &self.scene,
-                            &paint_metadata)
+
+        // Build clip paths.
+        let clip_paths = executor.build_vector(clip_path_count, |path_index| {
+            self.build_clip_path(ClipPathId(path_index as u32),
+                                 effective_view_box,
+                                 &self.built_options,
+                                 &self.scene)
         });
 
-        self.finish_building(&paint_metadata, alpha_tiles);
+        // Build draw paths.
+        let draw_paths = executor.build_vector(draw_path_count, |path_index| {
+            self.build_draw_path(DrawPathId(path_index as u32),
+                                 effective_view_box,
+                                 &self.built_options,
+                                 &self.scene,
+                                 &paint_metadata,
+                                 &clip_paths)
+        });
+
+        self.finish_building(&paint_metadata, clip_paths, draw_paths);
 
         let build_time = Instant::now() - start_time;
         self.listener.send(RenderCommand::Finish { build_time });
     }
 
-    fn build_path(
+    fn build_clip_path(
         &self,
-        path_index: usize,
+        clip_path_id: ClipPathId,
         view_box: RectF,
         built_options: &PreparedBuildOptions,
         scene: &Scene,
-        paint_metadata: &[PaintMetadata],
-    ) -> Vec<AlphaTile> {
-        let path_id = if path_index >= self.scene.draw_path_count() {
-            PathId::Draw(path_index as u32)
-        } else {
-            PathId::Clip(path_index as u32)
-        };
-
-        let outline = match path_id {
-            PathId::Draw(index) => scene.draw_paths[index as usize].outline(),
-            PathId::Clip(index) => scene.clip_paths[index as usize].outline(),
-        };
-        let outline = scene.apply_render_options(&outline, built_options);
-
-        let render_stage = match path_id {
-            PathId::Draw(index) => {
-                if scene.draw_paths[index as usize].clip_path().is_some() {
-                    RenderStage::Stage0
-                } else {
-                    RenderStage::Stage1
-                }
-            }
-            PathId::Clip(_) => RenderStage::Stage0,
-        };
+    ) -> ClipBuildResult {
+        let outline =   
+            scene.apply_render_options(scene.clip_paths[clip_path_id.0 as usize].outline(),
+                                       built_options);
 
         let tiling_path_info = TilingPathInfo {
             outline: &outline,
-            id: path_id,
-            paint_metadata: match path_id {
-                PathId::Draw(index) => {
-                    let paint_id = scene.draw_paths[index as usize].paint();
-                    Some(&paint_metadata[paint_id.0 as usize])
-                }
-                PathId::Clip(_) => None,
-            },
-            render_stage,
+            paint_clip_info: TilingPaintClipInfo::Clip { path_id: clip_path_id },
         };
+        let render_stage = tiling_path_info.render_stage();
 
         let mut tiler = Tiler::new(self, view_box, tiling_path_info);
         tiler.generate_tiles();
 
-        self.listener.send(RenderCommand::AddFills(tiler.built_object.fills));
-        tiler.built_object.alpha_tiles
-    }
+        self.listener.send(RenderCommand::AddFills {
+            fills: tiler.built_object.fills,
+            stage: render_stage,
+        });
 
-    fn cull_alpha_tiles(&self, alpha_tiles: &mut Vec<AlphaTile>) {
-        for alpha_tile in alpha_tiles {
-            let alpha_tile_coords = alpha_tile.upper_left.tile_position();
-            if self
-                .z_buffer
-                .test(alpha_tile_coords, alpha_tile.upper_left.object_index as u32)
-            {
-                continue;
-            }
-
-            // FIXME(pcwalton): Clean this up.
-            alpha_tile.upper_left.tile_x  = i16::MIN;
-            alpha_tile.upper_left.tile_y  = i16::MIN;
-            alpha_tile.upper_right.tile_x = i16::MIN;
-            alpha_tile.upper_right.tile_y = i16::MIN;
-            alpha_tile.lower_left.tile_x  = i16::MIN;
-            alpha_tile.lower_left.tile_y  = i16::MIN;
-            alpha_tile.lower_right.tile_x = i16::MIN;
-            alpha_tile.lower_right.tile_y = i16::MIN;
+        ClipBuildResult {
+            alpha_tiles: tiler.built_object.alpha_tiles,
+            tiles: tiler.built_object.tiles,
+            path_id: clip_path_id,
         }
     }
 
-    fn pack_alpha_tiles(&mut self, paint_metadata: &[PaintMetadata], alpha_tiles: Vec<AlphaTile>) {
+    fn build_draw_path(
+        &self,
+        draw_path_id: DrawPathId,
+        view_box: RectF,
+        built_options: &PreparedBuildOptions,
+        scene: &Scene,
+        paint_metadata: &[PaintMetadata],
+        clip_build_results: &[ClipBuildResult],
+    ) -> DrawBuildResult {
+        let outline = scene.draw_paths[draw_path_id.0 as usize].outline();
+        let outline = scene.apply_render_options(&outline, built_options);
+
+        let paint_id = scene.draw_paths[draw_path_id.0 as usize].paint();
+        let paint_metadata = &paint_metadata[paint_id.0 as usize];
+
+        let tiling_path_info = TilingPathInfo {
+            outline: &outline,
+            paint_clip_info: match self.scene.draw_paths[draw_path_id.0 as usize].clip_path() {
+                None => {
+                    TilingPaintClipInfo::Draw {
+                        path_id: draw_path_id,
+                        paint_metadata,
+                    }
+                }
+                Some(clip_path_id) => {
+                    let clip_build_result = clip_build_results.iter().filter(|clip_build_result| {
+                        clip_build_result.path_id == clip_path_id
+                    }).next().expect("Where's the clip build result?");
+
+                    TilingPaintClipInfo::DrawClipped {
+                        path_id: draw_path_id,
+                        clip_path_id,
+                        paint_metadata,
+                        clip_build_result,
+                    }
+                }
+            }
+        };
+
+        let stage = tiling_path_info.render_stage();
+
+        let mut tiler = Tiler::new(self, view_box, tiling_path_info);
+        tiler.generate_tiles();
+
+        self.listener.send(RenderCommand::AddFills { fills: tiler.built_object.fills, stage });
+
+        DrawBuildResult { alpha_tiles: tiler.built_object.alpha_tiles, path_id: draw_path_id }
+    }
+
+    fn cull_tiles(&self,
+                  clip_build_results: Vec<ClipBuildResult>,
+                  draw_build_results: Vec<DrawBuildResult>)
+                  -> CulledTiles {
+        let mut result = CulledTiles::new();
+
+        for clip_build_result in clip_build_results {
+            for clip_alpha_tile in clip_build_result.alpha_tiles {
+                // TODO(pcwalton): Cull clip tiles if at least one of the following is true:
+                // 1. All paths with that clip applied are occluded by a solid tile above them.
+                // 2. No path is clipped by this tile.
+                //
+                // NB: This is `result.draw`, not `result.clip`, because we actually draw 
+                result.draw.push(clip_alpha_tile);
+            }
+        }
+
+        for draw_build_result in draw_build_results {
+            for draw_alpha_tile in draw_build_result.alpha_tiles {
+                let alpha_tile_coords = draw_alpha_tile.upper_left.tile_position();
+                if self.z_buffer.test(alpha_tile_coords, draw_build_result.path_id.0) {
+                    result.draw.push(draw_alpha_tile);
+                }
+            }
+        }
+
+        result
+    }
+
+    fn pack_tiles(&mut self, paint_metadata: &[PaintMetadata], culled_tiles: CulledTiles) {
         let draw_path_count = self.scene.draw_paths.len() as u32;
         let solid_tiles = self.z_buffer.build_solid_tiles(&self.scene.draw_paths,
                                                           paint_metadata,
@@ -170,17 +218,21 @@ impl<'a> SceneBuilder<'a> {
         if !solid_tiles.is_empty() {
             self.listener.send(RenderCommand::DrawSolidTiles(solid_tiles));
         }
-        if !alpha_tiles.is_empty() {
-            self.listener.send(RenderCommand::DrawAlphaTiles(alpha_tiles));
+        if !culled_tiles.draw.is_empty() {
+            self.listener.send(RenderCommand::DrawAlphaTiles(culled_tiles.draw));
+        }
+        if !culled_tiles.clip.is_empty() {
+            self.listener.send(RenderCommand::DrawClipTiles(culled_tiles.clip));
         }
     }
 
     fn finish_building(&mut self,
                        paint_metadata: &[PaintMetadata],
-                       mut alpha_tiles: Vec<AlphaTile>) {
+                       clip_build_results: Vec<ClipBuildResult>,
+                       draw_build_results: Vec<DrawBuildResult>) {
         self.listener.send(RenderCommand::FlushFills);
-        self.cull_alpha_tiles(&mut alpha_tiles);
-        self.pack_alpha_tiles(paint_metadata, alpha_tiles);
+        let culled_tiles = self.cull_tiles(clip_build_results, draw_build_results);
+        self.pack_tiles(paint_metadata, culled_tiles);
     }
 }
 
@@ -193,7 +245,7 @@ pub struct TileStats {
 // Utilities for built objects
 
 impl BuiltObject {
-    pub(crate) fn new(bounds: RectF, render_stage: RenderStage) -> BuiltObject {
+    pub(crate) fn new(bounds: RectF) -> BuiltObject {
         let tile_rect = tiles::round_rect_out_to_tile_bounds(bounds);
         let tiles = DenseTileMap::new(tile_rect);
         BuiltObject {
@@ -201,7 +253,6 @@ impl BuiltObject {
             fills: vec![],
             alpha_tiles: vec![],
             tiles,
-            render_stage,
         }
     }
 
@@ -213,6 +264,7 @@ impl BuiltObject {
     fn add_fill(
         &mut self,
         builder: &SceneBuilder,
+        render_stage: RenderStage,
         segment: LineSegment2F,
         tile_coords: Vector2I,
     ) {
@@ -242,7 +294,9 @@ impl BuiltObject {
         }
 
         // Allocate global tile if necessary.
-        let alpha_tile_index = self.get_or_allocate_alpha_tile_index(builder, tile_coords);
+        let alpha_tile_index = self.get_or_allocate_alpha_tile_index(builder,   
+                                                                     render_stage,
+                                                                     tile_coords);
 
         // Pack whole pixels.
         let px = (segment & I32x4::splat(0xf00)).to_u32x4();
@@ -265,6 +319,7 @@ impl BuiltObject {
     fn get_or_allocate_alpha_tile_index(
         &mut self,
         builder: &SceneBuilder,
+        render_stage: RenderStage,
         tile_coords: Vector2I,
     ) -> u16 {
         let local_tile_index = self.tiles.coords_to_index_unchecked(tile_coords);
@@ -274,7 +329,7 @@ impl BuiltObject {
         }
 
         // FIXME(pcwalton): Handle overflow!
-        let alpha_tile_index = match self.render_stage {
+        let alpha_tile_index = match render_stage {
             RenderStage::Stage0 => {
                 builder.next_stage_0_alpha_tile_index.fetch_add(1, Ordering::Relaxed) as u16
             }
@@ -290,6 +345,7 @@ impl BuiltObject {
     pub(crate) fn add_active_fill(
         &mut self,
         builder: &SceneBuilder,
+        render_stage: RenderStage,
         left: f32,
         right: f32,
         mut winding: i32,
@@ -314,7 +370,7 @@ impl BuiltObject {
         );
 
         while winding != 0 {
-            self.add_fill(builder, segment, tile_coords);
+            self.add_fill(builder, render_stage, segment, tile_coords);
             if winding < 0 {
                 winding += 1
             } else {
@@ -326,6 +382,7 @@ impl BuiltObject {
     pub(crate) fn generate_fill_primitives_for_line(
         &mut self,
         builder: &SceneBuilder,
+        render_stage: RenderStage,
         mut segment: LineSegment2F,
         tile_y: i32,
     ) {
@@ -373,7 +430,7 @@ impl BuiltObject {
 
             let fill_segment = LineSegment2F::new(fill_from, fill_to);
             let fill_tile_coords = Vector2I::new(subsegment_tile_x, tile_y);
-            self.add_fill(builder, fill_segment, fill_tile_coords);
+            self.add_fill(builder, render_stage, fill_segment, fill_tile_coords);
         }
     }
 
@@ -386,4 +443,37 @@ impl BuiltObject {
     pub(crate) fn local_tile_index_to_coords(&self, tile_index: u32) -> Vector2I {
         self.tiles.index_to_coords(tile_index as usize)
     }
+}
+
+struct CulledTiles {
+    draw: Vec<AlphaTile>,
+    clip: Vec<AlphaTile>,
+}
+
+impl CulledTiles {
+    fn new() -> CulledTiles {
+        CulledTiles { draw: vec![], clip: vec![] }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct DrawBuildResult {
+    pub alpha_tiles: Vec<AlphaTile>,
+    pub path_id: DrawPathId,
+}
+
+#[derive(Debug)]
+pub(crate) struct ClipBuildResult {
+    pub alpha_tiles: Vec<AlphaTile>,
+    pub tiles: DenseTileMap<TileObjectPrimitive>,
+    pub path_id: ClipPathId,
+}
+
+#[derive(Debug)]
+pub(crate) struct BuiltObject {
+    pub bounds: RectF,
+    pub fills: Vec<FillBatchPrimitive>,
+    pub tiles: DenseTileMap<TileObjectPrimitive>,
+    pub alpha_tiles: Vec<AlphaTile>,
+    pub clip_tiles: Vec<AlphaTile>,
 }

@@ -46,9 +46,12 @@ pub struct NamedPath {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum PathId {
-    Draw(u32),
-    Clip(u32),
+    Draw(DrawPathId),
+    Clip(ClipPathId),
 }
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct DrawPathId(pub u32);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ClipPathId(pub u32);

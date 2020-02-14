@@ -10,8 +10,13 @@
 
 use crate::gpu::debug::DebugUIPresenter;
 use crate::gpu::options::{DestFramebuffer, RendererOptions};
-use crate::gpu::shaders::{FillProgram, AlphaTileProgram, AlphaTileVertexArray, FillVertexArray, MAX_FILLS_PER_BATCH, PostprocessProgram, PostprocessVertexArray, ReprojectionProgram, ReprojectionVertexArray, SolidTileProgram, SolidTileVertexArray, StencilProgram, StencilVertexArray};
-use crate::gpu_data::{AlphaTile, FillBatchPrimitive, PaintData, RenderCommand, SolidTileVertex};
+use crate::gpu::shaders::{FillProgram, AlphaTileProgram, AlphaTileVertexArray, ClipTileProgram};
+use crate::gpu::shaders::{ClipTileVertexArray, FillVertexArray, MAX_FILLS_PER_BATCH};
+use crate::gpu::shaders::{PostprocessProgram, PostprocessVertexArray, ReprojectionProgram};
+use crate::gpu::shaders::{ReprojectionVertexArray, SolidTileProgram, SolidTileVertexArray};
+use crate::gpu::shaders::{StencilProgram, StencilVertexArray};
+use crate::gpu_data::{AlphaTile, FillBatchPrimitive, PaintData, RenderCommand};
+use crate::gpu_data::{RenderStage, SolidTileVertex};
 use crate::post::DefringingKernel;
 use crate::tiles::{TILE_HEIGHT, TILE_WIDTH};
 use pathfinder_color::{self as color, ColorF, ColorU};
@@ -54,15 +59,17 @@ where
     fill_program: FillProgram<D>,
     solid_tile_program: SolidTileProgram<D>,
     alpha_tile_program: AlphaTileProgram<D>,
+    clip_tile_program: ClipTileProgram<D>,
     solid_tile_vertex_array: SolidTileVertexArray<D>,
     alpha_tile_vertex_array: AlphaTileVertexArray<D>,
+    clip_tile_vertex_array: ClipTileVertexArray<D>,
     area_lut_texture: D::Texture,
     quad_vertex_positions_buffer: D::Buffer,
     quad_vertex_indices_buffer: D::Buffer,
     quads_vertex_indices_buffer: D::Buffer,
     quads_vertex_indices_length: usize,
     fill_vertex_array: FillVertexArray<D>,
-    mask_framebuffer: D::Framebuffer,
+    mask_framebuffers: [D::Framebuffer; 2],
     paint_texture: Option<D::Texture>,
 
     // Postprocessing shader
@@ -81,7 +88,7 @@ where
 
     // Rendering state
     framebuffer_flags: FramebufferFlags,
-    buffered_fills: Vec<FillBatchPrimitive>,
+    buffered_fills: [Vec<FillBatchPrimitive>; 2],
 
     // Debug
     pub stats: RenderStats,
@@ -108,6 +115,7 @@ where
 
         let solid_tile_program = SolidTileProgram::new(&device, resources);
         let alpha_tile_program = AlphaTileProgram::new(&device, resources);
+        let clip_tile_program = ClipTileProgram::new(&device, resources);
 
         let postprocess_program = PostprocessProgram::new(&device, resources);
         let stencil_program = StencilProgram::new(&device, resources);
@@ -148,6 +156,11 @@ where
             &solid_tile_program,
             &quads_vertex_indices_buffer,
         );
+        let clip_tile_vertex_array = ClipTileVertexArray::new(
+            &device,
+            &clip_tile_program,
+            &quads_vertex_indices_buffer,
+        );
         let postprocess_vertex_array = PostprocessVertexArray::new(
             &device,
             &postprocess_program,
@@ -164,9 +177,14 @@ where
 
         let mask_framebuffer_size =
             Vector2I::new(MASK_FRAMEBUFFER_WIDTH, MASK_FRAMEBUFFER_HEIGHT);
-        let mask_framebuffer_texture =
-            device.create_texture(TextureFormat::R16F, mask_framebuffer_size);
-        let mask_framebuffer = device.create_framebuffer(mask_framebuffer_texture);
+        let mask_framebuffer_textures = (
+            device.create_texture(TextureFormat::R16F, mask_framebuffer_size),
+            device.create_texture(TextureFormat::R16F, mask_framebuffer_size),
+        );
+        let mask_framebuffers = [
+            device.create_framebuffer(mask_framebuffer_textures.0),
+            device.create_framebuffer(mask_framebuffer_textures.1),
+        ];
 
         let window_size = dest_framebuffer.window_size(&device);
         let debug_ui_presenter = DebugUIPresenter::new(&device, resources, window_size);
@@ -179,15 +197,17 @@ where
             fill_program,
             solid_tile_program,
             alpha_tile_program,
+            clip_tile_program,
             solid_tile_vertex_array,
             alpha_tile_vertex_array,
+            clip_tile_vertex_array,
             area_lut_texture,
             quad_vertex_positions_buffer,
             quad_vertex_indices_buffer,
             quads_vertex_indices_buffer,
             quads_vertex_indices_length: 0,
             fill_vertex_array,
-            mask_framebuffer,
+            mask_framebuffers,
             paint_texture: None,
 
             postprocess_source_framebuffer: None,
@@ -208,7 +228,7 @@ where
             debug_ui_presenter,
 
             framebuffer_flags: FramebufferFlags::empty(),
-            buffered_fills: vec![],
+            buffered_fills: [vec![], vec![]],
 
             postprocess_options: None,
             use_depth: false,
@@ -231,9 +251,10 @@ where
                 self.stats.path_count = path_count;
             }
             RenderCommand::AddPaintData(ref paint_data) => self.upload_paint_data(paint_data),
-            RenderCommand::AddFills(ref fills) => self.add_fills(fills),
+            RenderCommand::AddFills { ref fills, stage } => self.add_fills(fills, stage),
             RenderCommand::FlushFills => {
-                self.draw_buffered_fills();
+                self.draw_buffered_fills(RenderStage::Stage0);
+                self.draw_buffered_fills(RenderStage::Stage1);
                 self.begin_composite_timer_query();
             }
             RenderCommand::DrawSolidTiles(ref solid_tile_vertices) => {
@@ -247,6 +268,13 @@ where
                 self.stats.alpha_tile_count += count;
                 self.upload_alpha_tiles(alpha_tiles);
                 self.draw_alpha_tiles(count as u32);
+            }
+            RenderCommand::DrawClipTiles(ref clip_tiles) => {
+                let count = clip_tiles.len();
+                // TODO(pcwalton): Track clip tile counts separately?
+                self.stats.alpha_tile_count += count;
+                self.upload_clip_tiles(clip_tiles);
+                self.draw_clip_tiles(count as u32);
             }
             RenderCommand::Finish { .. } => {}
         }
@@ -391,6 +419,16 @@ where
         self.ensure_index_buffer(alpha_tiles.len());
     }
 
+    fn upload_clip_tiles(&mut self, clip_tiles: &[AlphaTile]) {
+        self.device.allocate_buffer(
+            &self.clip_tile_vertex_array.vertex_buffer,
+            BufferData::Memory(&clip_tiles),
+            BufferTarget::Vertex,
+            BufferUploadMode::Dynamic,
+        );
+        self.ensure_index_buffer(clip_tiles.len());
+    }
+
     fn ensure_index_buffer(&mut self, mut length: usize) {
         length = length.next_power_of_two();
         if self.quads_vertex_indices_length >= length {
@@ -416,7 +454,7 @@ where
         self.quads_vertex_indices_length = length;
     }
 
-    fn add_fills(&mut self, mut fills: &[FillBatchPrimitive]) {
+    fn add_fills(&mut self, mut fills: &[FillBatchPrimitive], stage: RenderStage) {
         if fills.is_empty() {
             return;
         }
@@ -424,17 +462,18 @@ where
         self.stats.fill_count += fills.len();
 
         while !fills.is_empty() {
-            let count = cmp::min(fills.len(), MAX_FILLS_PER_BATCH - self.buffered_fills.len());
-            self.buffered_fills.extend_from_slice(&fills[0..count]);
+            let count = cmp::min(fills.len(),
+                                 MAX_FILLS_PER_BATCH - self.buffered_fills[stage as usize].len());
+            self.buffered_fills[stage as usize].extend_from_slice(&fills[0..count]);
             fills = &fills[count..];
-            if self.buffered_fills.len() == MAX_FILLS_PER_BATCH {
-                self.draw_buffered_fills();
+            if self.buffered_fills[stage as usize].len() == MAX_FILLS_PER_BATCH {
+                self.draw_buffered_fills(stage);
             }
         }
     }
 
-    fn draw_buffered_fills(&mut self) {
-        if self.buffered_fills.is_empty() {
+    fn draw_buffered_fills(&mut self, stage: RenderStage) {
+        if self.buffered_fills[stage as usize].is_empty() {
             return;
         }
 
@@ -445,9 +484,17 @@ where
             BufferUploadMode::Dynamic,
         );
 
+        let must_preserve_contents_flag = match stage {
+            RenderStage::Stage0 => {
+                FramebufferFlags::MUST_PRESERVE_STAGE_0_MASK_FRAMEBUFFER_CONTENTS
+            }
+            RenderStage::Stage1 => {
+                FramebufferFlags::MUST_PRESERVE_STAGE_1_MASK_FRAMEBUFFER_CONTENTS
+            }
+        };
+
         let mut clear_color = None;
-        if !self.framebuffer_flags.contains(
-                FramebufferFlags::MUST_PRESERVE_MASK_FRAMEBUFFER_CONTENTS) {
+        if !self.framebuffer_flags.contains(must_preserve_contents_flag) {
             clear_color = Some(ColorF::default());
         };
 
@@ -456,7 +503,7 @@ where
 
         debug_assert!(self.buffered_fills.len() <= u32::MAX as usize);
         self.device.draw_elements_instanced(6, self.buffered_fills.len() as u32, &RenderState {
-            target: &RenderTarget::Framebuffer(&self.mask_framebuffer),
+            target: &RenderTarget::Framebuffer(&self.mask_framebuffers[stage as usize]),
             program: &self.fill_program.program,
             vertex_array: &self.fill_vertex_array.vertex_array,
             primitive: Primitive::Triangles,
@@ -483,8 +530,8 @@ where
         self.device.end_timer_query(&timer_query);
         self.current_timers.stage_0.push(timer_query);
 
-        self.framebuffer_flags.insert(FramebufferFlags::MUST_PRESERVE_MASK_FRAMEBUFFER_CONTENTS);
-        self.buffered_fills.clear();
+        self.framebuffer_flags.insert(must_preserve_contents_flag);
+        self.buffered_fills[stage as usize].clear();
     }
 
     fn tile_transform(&self) -> Transform4F {
@@ -496,7 +543,7 @@ where
     fn draw_alpha_tiles(&mut self, tile_count: u32) {
         let clear_color = self.clear_color_for_draw_operation();
 
-        let mut textures = vec![self.device.framebuffer_texture(&self.mask_framebuffer)];
+        let mut textures = vec![self.device.framebuffer_texture(&self.mask_framebuffers[1])];
         let mut uniforms = vec![
             (&self.alpha_tile_program.transform_uniform,
              UniformData::Mat4(self.tile_transform().to_columns())),
@@ -574,6 +621,44 @@ where
         });
 
         self.preserve_draw_framebuffer();
+    }
+
+    fn draw_clip_tiles(&mut self, tile_count: u32) {
+        let mut clear_color = None;
+        if !self.framebuffer_flags.contains(
+                FramebufferFlags::MUST_PRESERVE_STAGE_1_MASK_FRAMEBUFFER_CONTENTS) {
+            clear_color = Some(ColorF::default());
+        };
+
+        let timer_query = self.allocate_timer_query();
+        self.device.begin_timer_query(&timer_query);
+
+        let textures = vec![self.device.framebuffer_texture(&self.mask_framebuffers[0])];
+        let uniforms = vec![
+            (&self.clip_tile_program.tile_size_uniform,
+             UniformData::Vec2(F32x2::new(TILE_WIDTH as f32, TILE_HEIGHT as f32))),
+            (&self.clip_tile_program.mask_texture_uniform, UniformData::TextureUnit(0)),
+        ];
+
+        self.device.draw_elements(tile_count * 6, &RenderState {
+            target: &RenderTarget::Framebuffer(&self.mask_framebuffers[1]),
+            program: &self.clip_tile_program.program,
+            vertex_array: &self.clip_tile_vertex_array.vertex_array,
+            primitive: Primitive::Triangles,
+            textures: &textures,
+            uniforms: &uniforms,
+            viewport: self.mask_viewport(),
+            options: RenderOptions {
+                clear_ops: ClearOps { color: clear_color, ..ClearOps::default() },
+                ..RenderOptions::default()
+            },
+        });
+
+        self.device.end_timer_query(&timer_query);
+        self.current_timers.stage_0.push(timer_query);
+
+        self.framebuffer_flags
+            .insert(FramebufferFlags::MUST_PRESERVE_STAGE_1_MASK_FRAMEBUFFER_CONTENTS);
     }
 
     fn postprocess(&mut self) {
@@ -830,8 +915,8 @@ where
     }
 
     fn mask_viewport(&self) -> RectI {
-        let texture = self.device.framebuffer_texture(&self.mask_framebuffer);
-        RectI::new(Vector2I::default(), self.device.texture_size(texture))
+        RectI::new(Vector2I::default(),
+                   Vector2I::new(MASK_FRAMEBUFFER_WIDTH, MASK_FRAMEBUFFER_HEIGHT))
     }
 
     fn allocate_timer_query(&mut self) -> D::TimerQuery {
@@ -934,8 +1019,9 @@ impl Add<RenderTime> for RenderTime {
 
 bitflags! {
     struct FramebufferFlags: u8 {
-        const MUST_PRESERVE_MASK_FRAMEBUFFER_CONTENTS = 0x01;
-        const MUST_PRESERVE_POSTPROCESS_FRAMEBUFFER_CONTENTS = 0x02;
-        const MUST_PRESERVE_DEST_FRAMEBUFFER_CONTENTS = 0x04;
+        const MUST_PRESERVE_STAGE_0_MASK_FRAMEBUFFER_CONTENTS = 0x01;
+        const MUST_PRESERVE_STAGE_1_MASK_FRAMEBUFFER_CONTENTS = 0x02;
+        const MUST_PRESERVE_POSTPROCESS_FRAMEBUFFER_CONTENTS = 0x04;
+        const MUST_PRESERVE_DEST_FRAMEBUFFER_CONTENTS = 0x08;
     }
 }
