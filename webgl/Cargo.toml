@@ -14,16 +14,16 @@ default-features = false
 features = ["png"]
 
 [dependencies.pathfinder_geometry]
-path = "../geometry"
+version = "0.5"
 
 [dependencies.pathfinder_gpu]
-path = "../gpu"
+version = "0.5"
 
 [dependencies.pathfinder_renderer]
-path = "../renderer"
+version = "0.5"
 
 [dependencies.pathfinder_simd]
-path = "../simd"
+version = "0.5"
 
 [dependencies.web-sys]
 version = "0.3.4"
@@ -44,7 +44,7 @@ features = [
 ]
 
 [dependencies.pathfinder_resources]
-path = "../resources"
+version = "0.5"
 
 [dependencies.js-sys]
 version = "0.3.37"
